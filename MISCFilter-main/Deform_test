@@ -1,0 +1,265 @@
+import os
+import cv2
+import torch
+import torch.nn as nn
+import numpy as np
+from PIL import Image
+from skimage.util import img_as_ubyte
+import glob
+import math
+
+# =============================================
+# 导入可变形卷积版本的模型
+# =============================================
+from models.MISCFilterNet_Deform import MISCKernelNet_Deform as myNet
+import utils
+from tools.get_parameter_number import get_parameter_number
+
+
+# -----------------------------------------
+# 图像缩放函数
+# -----------------------------------------
+def resize_image(input_path, output_path, size, interpolation=cv2.INTER_LANCZOS4):
+    img = cv2.imread(input_path)
+    if img is None:
+        print(f"❌ 无法读取图像: {input_path}")
+        return False
+
+    resized = cv2.resize(img, size, interpolation=interpolation)
+    cv2.imwrite(output_path, resized)
+    print(f"✔ 已保存缩放图像: {output_path}")
+    return True
+
+
+# -----------------------------------------
+# MISCFilter (Deformable Conv) 推理器
+# -----------------------------------------
+class IterativeDeblurrer:
+    def __init__(self):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"使用设备: {self.device}")
+
+    def setup_model(self, weights_path, use_deform_in_feat=True, use_deform_in_encoder=True):
+        """
+        初始化可变形卷积模型
+        """
+        model_restoration = myNet(
+            inference=False,
+            use_deform_in_feat=use_deform_in_feat,
+            use_deform_in_encoder=use_deform_in_encoder
+        )
+
+        total_num, trainable_num = get_parameter_number(model_restoration)
+        print(f"模型参数量 - Total: {total_num}, Trainable: {trainable_num}")
+
+        utils.load_checkpoint(model_restoration, weights_path)
+        print(f"=== 使用权重: {weights_path}")
+
+        if self.device.type == 'cuda':
+            model_restoration.cuda()
+            model_restoration = nn.DataParallel(model_restoration)
+        else:
+            model_restoration = model_restoration.to(self.device)
+
+        model_restoration.eval()
+        return model_restoration
+
+    def forward_with_overlap(self, model, inp, win_size, overlap_ratio):
+        """
+        带重叠比例的滑窗推理
+        """
+        _, C, H, W = inp.shape
+        stride = int(win_size * (1 - overlap_ratio))
+        if stride == 0:
+            stride = 1  # 防止步长为0
+
+        # 计算需要的 padding 以保证图像能被完整滑动覆盖
+        pad_h = (win_size - (H % stride)) % stride
+        pad_w = (win_size - (W % stride)) % stride
+        if H < win_size: pad_h = win_size - H
+        if W < win_size: pad_w = win_size - W
+
+        # 边界填充 (Reflect padding 通常在去模糊任务中效果更好)
+        inp_padded = torch.nn.functional.pad(inp, (0, pad_w, 0, pad_h), mode='reflect')
+        _, _, pad_H, pad_W = inp_padded.shape
+
+        # 准备输出容器和权重累加器
+        out_padded = torch.zeros_like(inp_padded)
+        weight_padded = torch.zeros((1, 1, pad_H, pad_W), device=self.device)
+
+        # 汉明窗（Hamming Window）作为权重，缓解拼接缝隙
+        weight_1d = torch.hamming_window(win_size, device=self.device)
+        weight_2d = weight_1d.unsqueeze(0) * weight_1d.unsqueeze(1)
+        weight_2d = weight_2d.unsqueeze(0).unsqueeze(0)  # [1, 1, win_size, win_size]
+
+        # 收集所有窗口坐标
+        h_starts = list(range(0, pad_H - win_size + 1, stride))
+        w_starts = list(range(0, pad_W - win_size + 1, stride))
+
+        # 确保包含最边缘的窗口
+        if h_starts[-1] + win_size < pad_H: h_starts.append(pad_H - win_size)
+        if w_starts[-1] + win_size < pad_W: w_starts.append(pad_W - win_size)
+
+        # 遍历所有窗口进行推理
+        for h in h_starts:
+            for w in w_starts:
+                patch = inp_padded[:, :, h:h + win_size, w:w + win_size]
+
+                # 模型前向传播
+                restored_patch, _ = model(patch)
+
+                # 【重要修复】：如果模型返回的是多尺度列表/元组，取第一项（最高分辨率输出）
+                if isinstance(restored_patch, (list, tuple)):
+                    restored_patch = restored_patch[0]
+
+                # 累加结果和权重
+                out_padded[:, :, h:h + win_size, w:w + win_size] += restored_patch * weight_2d
+                weight_padded[:, :, h:h + win_size, w:w + win_size] += weight_2d
+
+        # 归一化并裁剪回原始大小
+        out_padded = out_padded / (weight_padded + 1e-8)
+        restored = out_padded[:, :, :H, :W]
+        return restored
+
+    def run_once(self, image_path, output_path, weights_path, win_size,
+                 overlap_ratio=0.25, strength=1.0,
+                 use_deform_in_feat=True, use_deform_in_encoder=True):
+        """
+        单次推理
+        """
+        model = self.setup_model(weights_path, use_deform_in_feat, use_deform_in_encoder)
+
+        with torch.no_grad():
+            inp_pil = Image.open(image_path).convert('RGB')
+            inp_np = np.array(inp_pil).astype(np.float32) / 255.0
+            inp = torch.from_numpy(inp_np).permute(2, 0, 1).unsqueeze(0).to(self.device)
+
+            # 使用带有重叠的滑窗推理
+            restored = self.forward_with_overlap(model, inp, win_size, overlap_ratio)
+
+            # ==========================================
+            # 调整输出强度 (Strength control)
+            # 原理: 最终图 = 原图 + 强度 * (模型输出图 - 原图)
+            # ==========================================
+            diff = restored - inp
+            enhanced_restored = inp + strength * diff
+
+            # 截断范围至 [0, 1] 保证颜色合法
+            enhanced_restored = torch.clamp(enhanced_restored, 0, 1)
+
+            # 保存图像
+            final_img = enhanced_restored.permute(0, 2, 3, 1).cpu().numpy()[0]
+            final_img = img_as_ubyte(final_img)
+            final_img = cv2.cvtColor(final_img, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(output_path, final_img)
+
+            print(f"✔ 推理完成 → {output_path} (强度={strength}, 重叠率={overlap_ratio})")
+
+
+# -----------------------------------------
+# 批量处理函数
+# -----------------------------------------
+def process_all_images(input_folder, output_folder, weights_path, win_size=512,
+                       overlap_ratio=0.25, strength=1.0, final_size=(1024, 1024),
+                       use_deform_in_feat=True, use_deform_in_encoder=True):
+    os.makedirs(output_folder, exist_ok=True)
+    temp_folder = "./temp_processing_deform"
+    os.makedirs(temp_folder, exist_ok=True)
+
+    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
+    image_files = []
+    for ext in image_extensions:
+        image_files.extend(glob.glob(os.path.join(input_folder, ext)))
+        image_files.extend(glob.glob(os.path.join(input_folder, ext.upper())))
+
+    image_files = list(set(image_files))
+    image_files.sort()
+
+    print(f"找到 {len(image_files)} 个图像文件")
+    if len(image_files) == 0:
+        print("❌ 未找到图像文件！")
+        return
+
+    deb = IterativeDeblurrer()
+
+    for i, image_path in enumerate(image_files, 1):
+        try:
+            filename = os.path.basename(image_path)
+            name_without_ext = os.path.splitext(filename)[0]
+
+            print(f"\n{'=' * 50}")
+            print(f"处理图像 {i}/{len(image_files)}: {filename}")
+            print(f"{'=' * 50}")
+
+            tmp_512 = os.path.join(temp_folder, f"{name_without_ext}_512.jpg")
+            out_512 = os.path.join(temp_folder, f"{name_without_ext}_output_512.jpg")
+            final_output = os.path.join(output_folder, f"{name_without_ext}_deblurred_deform.jpg")
+
+            print(f"=== Step1：缩放到 512×512 ===")
+            if not resize_image(image_path, tmp_512, (512, 512)):
+                continue
+
+            print(f"\n=== Step2：MISCFilter-Deform（win={win_size}, overlap={overlap_ratio}, strength={strength}）===")
+            deb.run_once(tmp_512, out_512, weights_path, win_size=win_size,
+                         overlap_ratio=overlap_ratio, strength=strength,
+                         use_deform_in_feat=use_deform_in_feat,
+                         use_deform_in_encoder=use_deform_in_encoder)
+
+            print(f"\n=== Step3：将结果放大到 {final_size[0]}×{final_size[1]} ===")
+            resize_image(out_512, final_output, final_size)
+            print(f"\n✅ 处理完成: {final_output}")
+
+        except Exception as e:
+            print(f"❌ 处理图像 {image_path} 时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    try:
+        import shutil
+        shutil.rmtree(temp_folder)
+    except:
+        pass
+
+    print(f"\n{'=' * 50}")
+    print(f"全部完成！共处理 {len(image_files)} 个图像")
+    print(f"{'=' * 50}")
+
+
+# -----------------------------------------
+# 主流程
+# -----------------------------------------
+def main():
+    # =============================================
+    # 配置参数
+    # =============================================
+    weights_path = r"/media/JYJ/新加卷/ZJL/checkpoints_deform/GoPro/MISCFilter_Deform_GoPro/model_epoch_1163.pth"
+    input_folder = r"/media/JYJ/新加卷/ZJL/MOHU2"
+    output_folder = r"/media/JYJ/新加卷/ZJL/L23"
+
+    use_deform_in_feat = True
+    use_deform_in_encoder = True
+
+    win_size = 256
+    final_size = (1024, 1024)
+
+    # =============== 新增参数 ======================
+    overlap_ratio = 0.8  # 窗口重叠比例 (0 到 0.99 之间, 推荐 0.25~0.5)
+    output_strength = 1.2  # 模型输出强度 (1.0 = 原强度, > 1.0 = 增加去模糊锐度)
+    # =============================================
+
+    process_all_images(
+        input_folder=input_folder,
+        output_folder=output_folder,
+        weights_path=weights_path,
+        win_size=win_size,
+        overlap_ratio=overlap_ratio,
+        strength=output_strength,
+        final_size=final_size,
+        use_deform_in_feat=use_deform_in_feat,
+        use_deform_in_encoder=use_deform_in_encoder
+    )
+
+
+if __name__ == '__main__':
+    main()
