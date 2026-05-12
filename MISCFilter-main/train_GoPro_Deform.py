@@ -62,13 +62,15 @@ class Config:
     # 可变形卷积设置
     use_deform_in_feat = True  # 是否在特征提取中使用可变形卷积
     use_deform_in_encoder = True  # 是否在编码器/解码器中使用可变形卷积
-    use_transformer_bottleneck = False  # 是否在瓶颈层使用 Transformer
+    use_transformer_bottleneck = True  # 是否在瓶颈层使用 Transformer
 
     # 恢复训练设置
     RESUME = True  # 首次训练设为 False，恢复训练设为 True
     Pretrain = False
     model_pre_dir = ''
     pretrain_strict = True  # 使用旧权重插入新模块时可设为 False
+    resume_strict = not use_transformer_bottleneck
+    resume_load_optimizer = not use_transformer_bottleneck
     # 如需在其他机器上继续训练，请通过环境变量覆盖默认路径
     resume_checkpoint = os.environ.get(
         "MISC_RESUME_CHECKPOINT",
@@ -175,9 +177,15 @@ if RESUME:
         )
     if not os.path.isfile(path_chk_rest):
         raise FileNotFoundError(f"Resume checkpoint not found: {path_chk_rest}")
-    utils.load_checkpoint(model_restoration, path_chk_rest)
+    load_result = utils.load_checkpoint(model_restoration, path_chk_rest, strict=args.resume_strict)
+    if not args.resume_strict:
+        print('Missing keys:', load_result.missing_keys)
+        print('Unexpected keys:', load_result.unexpected_keys)
     start_epoch = utils.load_start_epoch(path_chk_rest) + 1
-    utils.load_optim(optimizer, path_chk_rest)
+    if args.resume_load_optimizer:
+        utils.load_optim(optimizer, path_chk_rest)
+    else:
+        print('Skip optimizer state load (new modules added).')
 
     for i in range(1, start_epoch):
         scheduler.step()
