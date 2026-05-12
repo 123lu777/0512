@@ -69,7 +69,10 @@ class Config:
     Pretrain = False
     model_pre_dir = ''
     pretrain_strict = True  # 使用旧权重插入新模块时可设为 False
-    resume_checkpoint = r"/media/JYJ/新加卷/ZJL/checkpoints_deform/GoPro/MISCFilter_Deform_GoPro/model_epoch_1163.pth"
+    resume_checkpoint = os.environ.get(
+        "MISC_RESUME_CHECKPOINT",
+        r"/media/JYJ/新加卷/ZJL/checkpoints_deform/GoPro/MISCFilter_Deform_GoPro/model_epoch_1163.pth",
+    )
 
     # Transformer Bottleneck 参数
     transformer_num_heads = 4
@@ -163,7 +166,10 @@ if Pretrain:
 
 ######### Resume ###########
 if RESUME:
-    path_chk_rest = args.resume_checkpoint or utils.get_last_path(model_dir, '_latest.pth')
+    if args.resume_checkpoint is None:
+        path_chk_rest = utils.get_last_path(model_dir, '_latest.pth')
+    else:
+        path_chk_rest = args.resume_checkpoint
     if not os.path.isfile(path_chk_rest):
         raise FileNotFoundError(f"Resume checkpoint not found: {path_chk_rest}")
     utils.load_checkpoint(model_restoration, path_chk_rest)
