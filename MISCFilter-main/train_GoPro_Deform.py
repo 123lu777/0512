@@ -166,10 +166,9 @@ if Pretrain:
 
 ######### Resume ###########
 if RESUME:
-    if args.resume_checkpoint is None:
-        path_chk_rest = utils.get_last_path(model_dir, '_latest.pth')
-    else:
-        path_chk_rest = args.resume_checkpoint
+    path_chk_rest = args.resume_checkpoint
+    if not path_chk_rest:
+        raise ValueError("Resume checkpoint is empty. Set MISC_RESUME_CHECKPOINT or Config.resume_checkpoint.")
     if not os.path.isfile(path_chk_rest):
         raise FileNotFoundError(f"Resume checkpoint not found: {path_chk_rest}")
     utils.load_checkpoint(model_restoration, path_chk_rest)
