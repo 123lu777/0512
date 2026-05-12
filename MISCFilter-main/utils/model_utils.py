@@ -19,20 +19,16 @@ def save_checkpoint(model_dir, state, session):
     model_out_path = os.path.join(model_dir,"model_epoch_{}_{}.pth".format(epoch,session))
     torch.save(state, model_out_path)
 
-def load_checkpoint(model, weights):
+def load_checkpoint(model, weights, strict=True):
     checkpoint = torch.load(weights)
-    # print(checkpoint)
-    try:
-        model.load_state_dict(checkpoint["state_dict"])
-    except:
-        state_dict = checkpoint["state_dict"]
+    state_dict = checkpoint["state_dict"]
+    if any(key.startswith('module.') for key in state_dict.keys()):
         new_state_dict = OrderedDict()
         for k, v in state_dict.items():
-            # print(k)
-            name = k[7:] # remove `module.`
+            name = k[7:] if k.startswith('module.') else k
             new_state_dict[name] = v
-
-        model.load_state_dict(new_state_dict)
+        state_dict = new_state_dict
+    return model.load_state_dict(state_dict, strict=strict)
 
 
 def load_checkpoint_compress_doconv(model, weights):

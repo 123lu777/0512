@@ -62,11 +62,20 @@ class Config:
     # 可变形卷积设置
     use_deform_in_feat = True  # 是否在特征提取中使用可变形卷积
     use_deform_in_encoder = True  # 是否在编码器/解码器中使用可变形卷积
+    use_transformer_bottleneck = False  # 是否在瓶颈层使用 Transformer
 
     # 恢复训练设置
     RESUME = True  # 首次训练设为 False，恢复训练设为 True
     Pretrain = False
     model_pre_dir = ''
+    pretrain_strict = True  # 使用旧权重插入新模块时可设为 False
+
+    # Transformer Bottleneck 参数
+    transformer_num_heads = 4
+    transformer_num_layers = 1
+    transformer_mlp_ratio = 4.0
+    transformer_dropout = 0.0
+    transformer_attn_dropout = 0.0
 
 
 args = Config()
@@ -95,7 +104,13 @@ end_lr = 1e-6
 ######### Model ###########
 model_restoration = myNet(
     use_deform_in_feat=args.use_deform_in_feat,
-    use_deform_in_encoder=args.use_deform_in_encoder
+    use_deform_in_encoder=args.use_deform_in_encoder,
+    use_transformer_bottleneck=args.use_transformer_bottleneck,
+    transformer_num_heads=args.transformer_num_heads,
+    transformer_num_layers=args.transformer_num_layers,
+    transformer_mlp_ratio=args.transformer_mlp_ratio,
+    transformer_dropout=args.transformer_dropout,
+    transformer_attn_dropout=args.transformer_attn_dropout
 )
 
 # print number of model
@@ -104,6 +119,7 @@ print('=' * 60)
 print('Model: MISCKernelNet with Deformable Convolution')
 print('Use Deform in Feature Extraction:', args.use_deform_in_feat)
 print('Use Deform in Encoder/Decoder:', args.use_deform_in_encoder)
+print('Use Transformer Bottleneck:', args.use_transformer_bottleneck)
 print('=' * 60)
 print('Total:  ', total_num)
 print('Trainable: ', trainable_num)
@@ -112,6 +128,7 @@ with open(log_dir, "a+") as f:
     f.write('Model: MISCKernelNet with Deformable Convolution\n')
     f.write('Use Deform in Feature Extraction: {}\n'.format(args.use_deform_in_feat))
     f.write('Use Deform in Encoder/Decoder: {}\n'.format(args.use_deform_in_encoder))
+    f.write('Use Transformer Bottleneck: {}\n'.format(args.use_transformer_bottleneck))
     f.write('=' * 60 + '\n')
     f.write('Total: {}\n'.format(total_num))
     f.write('Trainable: {}\n'.format(trainable_num))
@@ -135,7 +152,10 @@ model_pre_dir = args.model_pre_dir
 
 ######### Pretrain ###########
 if Pretrain:
-    utils.load_checkpoint(model_restoration, model_pre_dir)
+    load_result = utils.load_checkpoint(model_restoration, model_pre_dir, strict=args.pretrain_strict)
+    if not args.pretrain_strict:
+        print('Missing keys:', load_result.missing_keys)
+        print('Unexpected keys:', load_result.unexpected_keys)
     print('------------------------------------------------------------------------------')
     print("==> Retrain Training with:  " + model_pre_dir)
     print('------------------------------------------------------------------------------')

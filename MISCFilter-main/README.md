@@ -130,6 +130,12 @@ python train_RealBlur_J.py
 ```
 4. The models are saved in `./experiments`
 
+### Deform 版本可选 Transformer Bottleneck
+`models/MISCFilterNet_Deform.py` 支持在最深层加入 Transformer Bottleneck。  
+可在 `train_GoPro_Deform.py` 的 `Config` 中设置：
+- `use_transformer_bottleneck`：是否启用 Transformer Bottleneck
+- `pretrain_strict=False`：加载旧权重并新增模块时使用
+
 ## Citation
 If you find the code and pre-trained models useful for your research, please consider citing our paper. :blush:
 ```
@@ -142,5 +148,4 @@ If you meet any problems, please describe them in issues or contact:
 
 ## Acknowledgement
 The code of MISCFilter is built upon [DeepRFT](https://github.com/INVOKERer/DeepRFT/tree/main), [MPRNet](https://github.com/swz30/MPRNet), [MIMO-UNet](https://github.com/chosj95/MIMO-UNet/tree/main), and [AdaCoF](https://github.com/HyeongminLEE/AdaCoF-pytorch/blob/master/cupy_module/adacof.py),and we express our gratitude to these awesome projects.
-
 

@@ -87,6 +87,53 @@ class FAM_Deform(nn.Module):
         return out
 
 
+class TransformerBlock(nn.Module):
+    """轻量 Transformer Block (用于瓶颈层)"""
+
+    def __init__(self, dim, num_heads, mlp_ratio=4.0, dropout=0.0, attn_dropout=0.0):
+        super(TransformerBlock, self).__init__()
+        if dim % num_heads != 0:
+            raise ValueError(f'dim ({dim}) must be divisible by num_heads ({num_heads}).')
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, dropout=attn_dropout)
+        self.drop = nn.Dropout(dropout)
+        self.norm2 = nn.LayerNorm(dim)
+        hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        seq = x.flatten(2).permute(2, 0, 1)  # (H*W, B, C)
+        seq_norm = self.norm1(seq)
+        attn_out, _ = self.attn(seq_norm, seq_norm, seq_norm, need_weights=False)
+        seq = seq + self.drop(attn_out)
+        seq = seq + self.mlp(self.norm2(seq))
+        out = seq.permute(1, 2, 0).reshape(b, c, h, w)
+        return out
+
+
+class TransformerBottleneck(nn.Module):
+    """可选 Transformer Bottleneck，用于建模全局上下文"""
+
+    def __init__(self, dim, num_heads=4, mlp_ratio=4.0, dropout=0.0, attn_dropout=0.0, num_layers=1):
+        super(TransformerBottleneck, self).__init__()
+        self.layers = nn.ModuleList([
+            TransformerBlock(dim, num_heads, mlp_ratio=mlp_ratio, dropout=dropout, attn_dropout=attn_dropout)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
 # 保持原有的辅助函数
 def CharbonnierFunc(data, epsilon=0.001):
     return torch.mean(torch.sqrt(data ** 2 + epsilon ** 2))
@@ -137,11 +184,13 @@ class MISCKernelNet_Deform(nn.Module):
     - 特征提取层 (feat_extract) 使用可变形卷积
     - 编码器/解码器 (Encoder/Decoder) 使用可变形卷积的 ResBlock
     - SCM/FAM 模块使用可变形卷积
+    - 可选 Transformer Bottleneck 建模全局上下文
 
     参数:
         use_deform_in_feat: 是否在 feat_extract 中使用可变形卷积 (默认 True)
         use_deform_in_encoder: 是否在 Encoder/Decoder 中使用可变形卷积 (默认 True)
         use_dcnv2:  是否使用 DCNv2 (带 mask，默认 True)
+        use_transformer_bottleneck: 是否使用 Transformer Bottleneck (默认 False)
     """
 
     def __init__(self,
@@ -154,6 +203,12 @@ class MISCKernelNet_Deform(nn.Module):
                  inference=False,
                  use_deform_in_feat=True,  # 新增：是否在特征提取中使用可变形卷积
                  use_deform_in_encoder=True,  # 新增：是否在编码器中使用可变形卷积
+                 use_transformer_bottleneck=False,  # 新增：是否在瓶颈层使用 Transformer
+                 transformer_num_heads=4,
+                 transformer_num_layers=1,
+                 transformer_mlp_ratio=4.0,
+                 transformer_dropout=0.0,
+                 transformer_attn_dropout=0.0,
                  ):
         super(MISCKernelNet_Deform, self).__init__()
         self.inference = inference
@@ -237,6 +292,18 @@ class MISCKernelNet_Deform(nn.Module):
         self.FAM2 = FAM_Deform(base_channel * 2, BasicConv=BasicConv)
         self.SCM2 = SCM_Deform(base_channel * 2, BasicConv=BasicConv)
 
+        if use_transformer_bottleneck:
+            self.bottleneck = TransformerBottleneck(
+                base_channel * 4,
+                num_heads=transformer_num_heads,
+                num_layers=transformer_num_layers,
+                mlp_ratio=transformer_mlp_ratio,
+                dropout=transformer_dropout,
+                attn_dropout=transformer_attn_dropout
+            )
+        else:
+            self.bottleneck = nn.Identity()
+
         self.softmax = nn.Softmax(1)
         self.modulePad = torch.nn.ReplicationPad2d([self.kernel_pad, self.kernel_pad, self.kernel_pad, self.kernel_pad])
         self.moduleKernel = misckernel.FunctionKernel.apply
@@ -316,6 +383,7 @@ class MISCKernelNet_Deform(nn.Module):
         z = self.feat_extract[2](res2)
         z = self.FAM1(z, z4)
         z = self.Encoder[2](z)
+        z = self.bottleneck(z)
 
         z12 = F.interpolate(res1, scale_factor=0.5)
         z21 = F.interpolate(res2, scale_factor=2)

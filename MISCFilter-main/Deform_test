@@ -39,20 +39,32 @@ class IterativeDeblurrer:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"使用设备: {self.device}")
 
-    def setup_model(self, weights_path, use_deform_in_feat=True, use_deform_in_encoder=True):
+    def setup_model(self, weights_path, use_deform_in_feat=True, use_deform_in_encoder=True,
+                    use_transformer_bottleneck=False, transformer_num_heads=4, transformer_num_layers=1,
+                    transformer_mlp_ratio=4.0, transformer_dropout=0.0, transformer_attn_dropout=0.0,
+                    strict_load=True):
         """
         初始化可变形卷积模型
         """
         model_restoration = myNet(
             inference=False,
             use_deform_in_feat=use_deform_in_feat,
-            use_deform_in_encoder=use_deform_in_encoder
+            use_deform_in_encoder=use_deform_in_encoder,
+            use_transformer_bottleneck=use_transformer_bottleneck,
+            transformer_num_heads=transformer_num_heads,
+            transformer_num_layers=transformer_num_layers,
+            transformer_mlp_ratio=transformer_mlp_ratio,
+            transformer_dropout=transformer_dropout,
+            transformer_attn_dropout=transformer_attn_dropout
         )
 
         total_num, trainable_num = get_parameter_number(model_restoration)
         print(f"模型参数量 - Total: {total_num}, Trainable: {trainable_num}")
 
-        utils.load_checkpoint(model_restoration, weights_path)
+        load_result = utils.load_checkpoint(model_restoration, weights_path, strict=strict_load)
+        if not strict_load:
+            print('Missing keys:', load_result.missing_keys)
+            print('Unexpected keys:', load_result.unexpected_keys)
         print(f"=== 使用权重: {weights_path}")
 
         if self.device.type == 'cuda':
@@ -123,11 +135,25 @@ class IterativeDeblurrer:
 
     def run_once(self, image_path, output_path, weights_path, win_size,
                  overlap_ratio=0.25, strength=1.0,
-                 use_deform_in_feat=True, use_deform_in_encoder=True):
+                 use_deform_in_feat=True, use_deform_in_encoder=True,
+                 use_transformer_bottleneck=False, transformer_num_heads=4, transformer_num_layers=1,
+                 transformer_mlp_ratio=4.0, transformer_dropout=0.0, transformer_attn_dropout=0.0,
+                 strict_load=True):
         """
         单次推理
         """
-        model = self.setup_model(weights_path, use_deform_in_feat, use_deform_in_encoder)
+        model = self.setup_model(
+            weights_path,
+            use_deform_in_feat=use_deform_in_feat,
+            use_deform_in_encoder=use_deform_in_encoder,
+            use_transformer_bottleneck=use_transformer_bottleneck,
+            transformer_num_heads=transformer_num_heads,
+            transformer_num_layers=transformer_num_layers,
+            transformer_mlp_ratio=transformer_mlp_ratio,
+            transformer_dropout=transformer_dropout,
+            transformer_attn_dropout=transformer_attn_dropout,
+            strict_load=strict_load
+        )
 
         with torch.no_grad():
             inp_pil = Image.open(image_path).convert('RGB')
@@ -161,7 +187,10 @@ class IterativeDeblurrer:
 # -----------------------------------------
 def process_all_images(input_folder, output_folder, weights_path, win_size=512,
                        overlap_ratio=0.25, strength=1.0, final_size=(1024, 1024),
-                       use_deform_in_feat=True, use_deform_in_encoder=True):
+                       use_deform_in_feat=True, use_deform_in_encoder=True,
+                       use_transformer_bottleneck=False, transformer_num_heads=4, transformer_num_layers=1,
+                       transformer_mlp_ratio=4.0, transformer_dropout=0.0, transformer_attn_dropout=0.0,
+                       strict_load=True):
     os.makedirs(output_folder, exist_ok=True)
     temp_folder = "./temp_processing_deform"
     os.makedirs(temp_folder, exist_ok=True)
@@ -203,7 +232,14 @@ def process_all_images(input_folder, output_folder, weights_path, win_size=512,
             deb.run_once(tmp_512, out_512, weights_path, win_size=win_size,
                          overlap_ratio=overlap_ratio, strength=strength,
                          use_deform_in_feat=use_deform_in_feat,
-                         use_deform_in_encoder=use_deform_in_encoder)
+                         use_deform_in_encoder=use_deform_in_encoder,
+                         use_transformer_bottleneck=use_transformer_bottleneck,
+                         transformer_num_heads=transformer_num_heads,
+                         transformer_num_layers=transformer_num_layers,
+                         transformer_mlp_ratio=transformer_mlp_ratio,
+                         transformer_dropout=transformer_dropout,
+                         transformer_attn_dropout=transformer_attn_dropout,
+                         strict_load=strict_load)
 
             print(f"\n=== Step3：将结果放大到 {final_size[0]}×{final_size[1]} ===")
             resize_image(out_512, final_output, final_size)
@@ -239,6 +275,8 @@ def main():
 
     use_deform_in_feat = True
     use_deform_in_encoder = True
+    use_transformer_bottleneck = False
+    strict_load = True
 
     win_size = 256
     final_size = (1024, 1024)
@@ -257,7 +295,9 @@ def main():
         strength=output_strength,
         final_size=final_size,
         use_deform_in_feat=use_deform_in_feat,
-        use_deform_in_encoder=use_deform_in_encoder
+        use_deform_in_encoder=use_deform_in_encoder,
+        use_transformer_bottleneck=use_transformer_bottleneck,
+        strict_load=strict_load
     )
 
 
